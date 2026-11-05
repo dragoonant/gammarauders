@@ -1,3 +1,11 @@
 node_modules
 dist
+e2e-out
+test-results
+playwright-report
+docs/sources/
 *.log
+.env*
+*.token*
+Tokens.txt
+tokens.txt*

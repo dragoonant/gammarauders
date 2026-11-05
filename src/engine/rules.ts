@@ -276,6 +276,21 @@ export function hitOnAgainst(s: GameState, attacker: Player, target: Player, tar
   return Math.min(6, Math.max(2, RULES.baseHitOn - playerStats(attacker).hitBonus + cover));
 }
 
+/** The roll this Behemoth needs against a target in the open (shown in the panel). */
+export function baseHitOn(p: Player): number {
+  return Math.min(6, Math.max(2, RULES.baseHitOn - playerStats(p).hitBonus));
+}
+
+/** Keys of every hex within `range` of `center`, excluding the center itself. */
+export function hexesWithin(s: GameState, center: Hex, range: number): Set<string> {
+  const out = new Set<string>();
+  for (const [k, t] of Object.entries(s.tiles)) {
+    const d = distance(t, center);
+    if (d > 0 && d <= range) out.add(k);
+  }
+  return out;
+}
+
 export function damagePerHit(w: WeaponStats, targetArmor: number): number {
   return w.pierce ? w.damage : Math.max(1, w.damage - targetArmor);
 }

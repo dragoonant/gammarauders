@@ -1,9 +1,13 @@
 import './style.css';
 import { newAIContext, planAction, type AIContext } from './engine/ai';
-import { getCard, weaponSummary, type CardDef } from './engine/cards';
+import { CARDS, getCard, weaponSummary, type CardDef } from './engine/cards';
 import { distance, hexKey } from './engine/hex';
+import { makeEnvelope, readEnvelope, type SaveEnvelope } from './engine/save';
 import {
   RULES,
+  baseHitOn,
+  hexesWithin,
+  occupant,
   applyAction,
   createGame,
   currentPlayer,
@@ -28,7 +32,8 @@ import {
   floatText,
   keyFromEvent,
   parseKey,
-  pidFromEvent,
+  TERRAIN_LABEL,
+  tileFacts,
   renderTiles,
   renderTokens,
   setTokenPos,
@@ -41,7 +46,8 @@ import { rulesHtml } from './ui/rulesText';
 // App state
 
 const HUMAN = 0;
-const SAVE_KEY = 'wasteland-behemoths-save-v1';
+/** Per-game key: every Pages game shares the dragoonant.github.io origin (KB rule 22). */
+const SAVE_KEY = 'wasteland-behemoths-save';
 const COLORS = ['#e8b04b', '#e5534b', '#4fc1e9', '#a77de8'];
 const WARLORDS = [
   { name: 'The Cinder Khan', beast: 'Scaldback' },
@@ -70,6 +76,13 @@ const ui = {
   busy: false,
   message: '' as string,
   lastShot: null as Extract<GameEvent, { kind: 'shot' }> | null,
+  /** Setup and accepted actions of the game in progress, for the save envelope. */
+  setup: null as SaveEnvelope['setup'] | null,
+  actions: [] as Action[],
+  storageError: '',
+  /** Hex whose contents the inspector shows (hover or tap). */
+  inspect: null as string | null,
+  confirmNew: false,
 };
 
 const app = document.getElementById('app')!;
@@ -95,28 +108,60 @@ function saveSettings(): void {
   }
 }
 
+/** Autosave after every accepted action and at game start (KB rule 22). Never silent. */
 function saveGame(): void {
+  const g = ui.game;
+  if (!g || !ui.setup) return;
   try {
-    if (ui.game && ui.game.winner === null) localStorage.setItem(SAVE_KEY, JSON.stringify(ui.game));
-    else localStorage.removeItem(SAVE_KEY);
+    if (g.winner !== null) localStorage.removeItem(SAVE_KEY);
+    else localStorage.setItem(SAVE_KEY, JSON.stringify(makeEnvelope(ui.setup, ui.actions, g)));
+    ui.storageError = '';
   } catch {
-    /* storage unavailable */
+    ui.storageError = 'This browser is not storing saves, so closing the tab will lose this game.';
   }
 }
 
-function loadGame(): GameState | null {
+type SaveInfo = { kind: 'none' } | { kind: 'ok'; envelope: SaveEnvelope } | { kind: 'bad'; reason: string };
+
+function readSave(): SaveInfo {
+  let raw: string | null;
   try {
-    const raw = localStorage.getItem(SAVE_KEY);
-    return raw ? (JSON.parse(raw) as GameState) : null;
+    raw = localStorage.getItem(SAVE_KEY);
   } catch {
-    return null;
+    return { kind: 'bad', reason: 'this browser refused to read saved games' };
   }
+  if (!raw) return { kind: 'none' };
+  const r = readEnvelope(raw);
+  if (r.ok) return { kind: 'ok', envelope: r.envelope };
+  if (r.finished) {
+    discardSave();
+    return { kind: 'none' };
+  }
+  return { kind: 'bad', reason: r.reason };
+}
+
+function discardSave(): void {
+  try {
+    localStorage.removeItem(SAVE_KEY);
+  } catch {
+    /* nothing stored to remove */
+  }
+}
+
+function describeSave(env: SaveEnvelope): string {
+  const s = env.snapshot;
+  const sides = s.players.map((p) => p.beast).join(' vs ');
+  const turn = s.current === HUMAN ? 'your turn' : `${s.players[s.current].name}'s turn`;
+  const vp = s.players.map((p) => p.vp).join(' / ');
+  const when = new Date(env.savedAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  return `${sides} · round ${s.round}, ${turn} · VP ${vp} · saved ${when}`;
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 
-const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+const esc = (t: string) =>
+  t.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const delay = () => (ui.settings.speed === 'fast' ? 220 : 600);
 
@@ -141,14 +186,28 @@ function kindLabel(def: CardDef): string {
 // ---------------------------------------------------------------------------
 // Setup screen
 
+function saveNotice(save: SaveInfo): string {
+  if (save.kind === 'ok') {
+    return `<div class="save-box"><b>Saved game</b><span>${esc(describeSave(save.envelope))}</span>
+      <button type="button" class="btn primary" data-act="continue">Continue</button></div>`;
+  }
+  if (save.kind === 'bad') {
+    return `<div class="save-box bad"><b>Your saved game can't be opened</b><span>Reason: ${esc(save.reason)}.</span>
+      <button type="button" class="btn small" data-act="discard-save">Discard it</button></div>`;
+  }
+  return '';
+}
+
 function renderSetup(): void {
-  const saved = loadGame();
+  const saved = readSave();
+  ui.confirmNew = false;
   const s = ui.settings;
   app.innerHTML = `
   <div class="setup">
     <div class="setup-card">
       <h1 class="logo">WASTELAND<span>BEHEMOTHS</span></h1>
       <p class="tag">Graft weapons onto a giant bio-mech, claim the Rad Wells, and break the other warlords' monsters.</p>
+      ${saveNotice(saved)}
       <form id="setup-form">
         <label>Your warlord name <input name="name" maxlength="20" value="${esc(s.name)}"/></label>
         <label>Your Behemoth's name <input name="beast" maxlength="16" value="${esc(s.beast)}"/></label>
@@ -163,16 +222,24 @@ function renderSetup(): void {
         </label>
         <label>Map seed <span class="muted">(optional, leave blank for a random map)</span> <input name="seed" inputmode="numeric" placeholder="random"/></label>
         <div class="setup-actions">
-          <button type="submit" class="btn primary">New game</button>
-          ${saved ? `<button type="button" class="btn" data-act="continue">Continue saved game (round ${saved.round})</button>` : ''}
+          <button type="submit" class="btn ${saved.kind === 'ok' ? '' : 'primary'}" id="new-game">New game</button>
           <button type="button" class="btn ghost" data-act="rules">Rules</button>
         </div>
+        <p class="replace-warn" id="replace-warn" hidden>This replaces your saved game. Press <b>Replace and start</b> to confirm.</p>
       </form>
+      <p class="credit">An original game by evilgouki. Saves stay in this browser only: a local copy and the web version keep separate saves.</p>
     </div>
   </div>
   <div id="modal"></div>`;
   document.getElementById('setup-form')!.addEventListener('submit', (e) => {
     e.preventDefault();
+    // Discard asks once more (KB rule 22).
+    if (readSave().kind === 'ok' && !ui.confirmNew) {
+      ui.confirmNew = true;
+      document.getElementById('replace-warn')!.hidden = false;
+      document.getElementById('new-game')!.textContent = 'Replace and start';
+      return;
+    }
     const f = new FormData(e.target as HTMLFormElement);
     ui.settings = {
       name: String(f.get('name') || 'You').trim() || 'You',
@@ -195,14 +262,24 @@ function hashSeed(t: string): number {
 
 function startGame(seed?: number): void {
   const s = ui.settings;
-  ui.game = createGame({
-    seed,
+  const setup: SaveEnvelope['setup'] = {
+    seed: (seed ?? Math.floor(Math.random() * 2 ** 31)) >>> 0,
     vpToWin: s.vpToWin,
     players: [
       { name: s.name, beast: s.beast, color: COLORS[0], isAI: false },
       ...WARLORDS.slice(0, s.opponents).map((w, i) => ({ ...w, color: COLORS[i + 1], isAI: true })),
     ],
-  });
+  };
+  ui.setup = setup;
+  ui.actions = [];
+  ui.game = createGame(setup);
+  enterGame();
+}
+
+function continueGame(env: SaveEnvelope): void {
+  ui.setup = env.setup;
+  ui.actions = env.actions;
+  ui.game = env.snapshot;
   enterGame();
 }
 
@@ -225,14 +302,24 @@ function enterGame(): void {
       <span><i class="sw t-plains"></i>Plains 1</span><span><i class="sw t-ruins"></i>Ruins 2 · cover</span>
       <span><i class="sw t-swamp"></i>Swamp 2</span><span><i class="sw t-rad"></i>Rad 1 · burns</span>
       <span><i class="sw t-mountain"></i>Crags</span><span><i class="sw well-sw"></i>Rad Well</span>
-    </div></section>
+    </div><div class="inspector" id="inspector"></div></section>
     <aside class="panel" id="panel"></aside>
   </main>
   <div id="modal"></div>`;
   const board = document.getElementById('board')!;
+  // Tiles are the only pick targets (KB rule 25); tokens and effects ignore the pointer.
   board.addEventListener('click', onBoardClick);
-  renderAll();
+  board.addEventListener('pointerover', (e) => {
+    if ((e as PointerEvent).pointerType !== 'mouse') return;
+    const key = keyFromEvent(e);
+    if (key && key !== ui.inspect) {
+      ui.inspect = key;
+      renderInspector();
+    }
+  });
+  ui.inspect = me().pos ? hexKey(me().pos!) : null;
   saveGame();
+  renderAll();
   if (currentPlayer(g).isAI && g.winner === null) void runAI();
 }
 
@@ -242,6 +329,7 @@ function enterGame(): void {
 function highlights(): BoardHighlights {
   const hl = emptyHighlights();
   const g = ui.game!;
+  hl.inspect = ui.inspect;
   if (!myTurn()) return hl;
   const p = me();
   if (!p.pos) return hl;
@@ -254,10 +342,7 @@ function highlights(): BoardHighlights {
     const mode = ui.mode;
     const w = weapons(p).find((x) => x.id === mode.weaponId);
     if (w) {
-      for (const k of Object.keys(g.tiles)) {
-        const t = g.tiles[k];
-        if (distance(t, p.pos) <= w.stats.range && distance(t, p.pos) > 0) hl.inRange.add(k);
-      }
+      hl.inRange = hexesWithin(g, p.pos, w.stats.range);
       for (const e of enemiesInRange(g, p, w.stats.range)) hl.targets.add(e.id);
     }
   } else if (ui.mode.kind === 'target') {
@@ -265,10 +350,7 @@ function highlights(): BoardHighlights {
     const card = p.hand.find((c) => c.uid === mode.cardUid);
     if (card) {
       const def = getCard(card.defId);
-      for (const k of Object.keys(g.tiles)) {
-        const t = g.tiles[k];
-        if (distance(t, p.pos) <= (def.targetRange ?? 0) && distance(t, p.pos) > 0) hl.inRange.add(k);
-      }
+      hl.inRange = hexesWithin(g, p.pos, def.targetRange ?? 0);
       for (const e of tacticTargets(g, p, def)) hl.targets.add(e.id);
     }
   }
@@ -282,7 +364,36 @@ function renderAll(): void {
   renderTiles(g, hl);
   renderTokens(g, hl);
   renderPanel();
+  renderInspector();
   renderGameOver();
+}
+
+/** Shows what stands on the inspected hex: the hover info a figure used to give (KB rule 25). */
+function renderInspector(): void {
+  const el = document.getElementById('inspector');
+  const g = ui.game;
+  if (!el || !g) return;
+  const t = ui.inspect ? g.tiles[ui.inspect] : undefined;
+  if (!t) {
+    el.innerHTML = '<span class="muted">Hover or tap a hex to see what is there.</span>';
+    return;
+  }
+  const lines = tileFacts(g, t);
+  const reach = myTurn() && me().pos ? reachable(g, me()).get(hexKey(t)) : undefined;
+  if (reach) lines.push(`Move here: ${reach.cost}`);
+  const who = occupant(g, t);
+  let unit = '';
+  if (who) {
+    const st = playerStats(who);
+    const gs = grafts(who);
+    const d = me().pos && who.id !== HUMAN ? distance(me().pos!, t) : null;
+    unit = `<div class="insp-unit" style="--pc:${who.color}">
+      <b>${esc(who.beast)}</b> <small>${esc(who.name)}</small>
+      <span>Hull ${who.hull}/${st.maxHull} · Armor ${st.armor} · Move ${st.move} · Hits on ${baseHitOn(who)}+${d !== null ? ` · ${d} hexes away` : ''}</span>
+      <span>${gs.length ? gs.map((x) => `${esc(x.def.name)}`).join(', ') : 'No grafts'}</span>
+    </div>`;
+  }
+  el.innerHTML = `<div class="insp-tile">${lines.map((l) => `<span>${esc(l)}</span>`).join('')}</div>${unit}`;
 }
 
 function hullBar(p: Player): string {
@@ -306,11 +417,11 @@ function scoreboard(g: GameState): string {
         <div class="vpbar"><div style="width:${vpPct}%"></div></div>
         <div class="score-meta">
           ${p.destroyed ? '<span class="tagbad">DESTROYED, respawning</span>' : hullBar(p)}
-          <span title="Wells held">◆ ${wellsOwned(g, p.id).length} (+${wellIncomeVP(g, p.id)} VP/turn)</span>
-          <span title="Energy">⚡ ${p.energy}</span>
-          <span title="Cards in hand">🂠 ${p.hand.length}</span>
+          <span>◆ ${wellsOwned(g, p.id).length} wells (+${wellIncomeVP(g, p.id)} VP)</span>
+          <span>⚡ ${p.energy}</span>
+          <span>${p.hand.length} cards</span>
         </div>
-        ${p.id !== HUMAN && gs.length ? `<div class="score-grafts">${gs.map((x) => `<span class="chip ${x.def.kind}" title="${esc(x.def.text)}">${esc(x.def.name)}</span>`).join('')}</div>` : ''}
+        ${p.id !== HUMAN && gs.length ? `<div class="score-grafts">${gs.map((x) => `<span class="chip ${x.def.kind}">${esc(x.def.name)}</span>`).join('')}</div>` : ''}
       </div>`;
     })
     .join('');
@@ -322,8 +433,9 @@ function slotsGrid(p: Player): string {
     for (let i = 0; i < SLOT_COUNTS[slot]; i++) {
       const c = p.slots[slot][i];
       const def = c ? getCard(c.defId) : null;
-      out += `<div class="slot ${def ? def.kind : 'empty'}" title="${def ? esc(def.text) : 'Empty slot'}">
-        <small>${slotLabel(slot, i)}</small><span>${def ? esc(def.name) : '—'}</span></div>`;
+      out += `<div class="slot ${def ? def.kind : 'empty'}">
+        <small>${slotLabel(slot, i)}</small><span>${def ? esc(def.name) : 'empty'}</span>
+        ${def ? `<em>${esc(def.weapon ? weaponSummary(def.weapon) : def.text)}</em>` : ''}</div>`;
     }
   }
   return `<div class="slots">${out}</div>`;
@@ -337,10 +449,10 @@ function weaponsList(g: GameState, p: Player): string {
       const aiming = ui.mode.kind === 'aim' && ui.mode.weaponId === w.id;
       const disabled = !canAct || !w.ready || targets.length === 0;
       return `<div class="weapon ${w.ready ? '' : 'spent'} ${aiming ? 'aiming' : ''}">
-        <div><b>${esc(w.name)}</b> <small>${weaponSummary(w.stats)}</small></div>
-        <button class="btn small ${aiming ? 'danger' : ''}" data-act="${aiming ? 'cancel' : 'aim'}" data-wid="${w.id}" ${disabled && !aiming ? 'disabled' : ''}
-          title="${!w.ready ? 'Already fired this turn' : targets.length === 0 ? 'No enemy in range' : 'Fire'}">
-          ${aiming ? 'Cancel' : w.ready ? 'Fire' : 'Spent'}</button>
+        <div><b>${esc(w.name)}</b> <small>${weaponSummary(w.stats)}</small>
+          ${canAct && w.ready && !targets.length ? '<small class="why">no enemy in range</small>' : ''}</div>
+        <button class="btn small ${aiming ? 'danger' : ''}" data-act="${aiming ? 'cancel' : 'aim'}" data-wid="${w.id}" ${disabled && !aiming ? 'disabled' : ''}>
+          ${aiming ? 'Cancel' : w.ready ? 'Fire' : 'Fired'}</button>
       </div>`;
     })
     .join('');
@@ -452,17 +564,18 @@ function renderPanel(): void {
   panel.innerHTML = `
     <div class="status"><span>Round ${g.round}</span><span>${status}</span></div>
     ${ui.message ? `<div class="toast">${esc(ui.message)}</div>` : ''}
+    ${ui.storageError ? `<div class="toast">${esc(ui.storageError)}</div>` : ''}
     <section class="block">${scoreboard(g)}</section>
     ${lastShotView(g)}
     <section class="block mine" style="--pc:${p.color}">
       <h3>${esc(p.beast)} <small>your Behemoth</small></h3>
       ${p.destroyed ? '<p class="tagbad">Destroyed. Respawns at your base next turn.</p>' : hullBar(p)}
       <div class="stats">
-        <span title="Energy (gain per turn)">⚡ <b>${p.energy}</b> <small>+${energyIncome(g, p)}/turn</small></span>
-        <span title="Movement left / per turn">👣 <b>${p.movesLeft}</b><small>/${st.move}</small></span>
-        <span title="Armor reduces each hit">🛡 <b>${st.armor}</b></span>
-        <span title="Die result needed to hit">🎯 <b>${Math.max(2, RULES.baseHitOn - st.hitBonus)}+</b></span>
-        ${p.pos ? `<span title="Terrain you stand on">${tileAt(g, p.pos)!.terrain}</span>` : ''}
+        <span><small>Energy</small> <b>${p.energy}</b> <small>+${energyIncome(g, p)}/turn</small></span>
+        <span><small>Move</small> <b>${p.movesLeft}</b><small>/${st.move}</small></span>
+        <span><small>Armor</small> <b>${st.armor}</b></span>
+        <span><small>Hits on</small> <b>${baseHitOn(p)}+</b></span>
+        ${p.pos ? `<span><small>On</small> ${TERRAIN_LABEL[tileAt(g, p.pos)!.terrain]}</span>` : ''}
       </div>
       ${slotsGrid(p)}
     </section>
@@ -503,7 +616,7 @@ function showRules(): void {
   modal.dataset.kind = 'rules';
   modal.innerHTML = `<div class="overlay" data-act="close-modal"><div class="dialog rules" data-stop>
     ${rulesHtml(ui.game?.vpToWin ?? ui.settings.vpToWin)}
-    <h3>Cards</h3><p class="muted">The shared deck has 66 cards: weapons, mutations and one-shot tactics. Tap a card in your hand for its full text.</p>
+    <h3>Cards</h3><p class="muted">The shared deck has ${CARDS.reduce((n, c) => n + c.count, 0)} cards: weapons, mutations and one-shot tactics. Tap a card in your hand for its full text.</p>
     <div class="setup-actions"><button class="btn primary" data-act="close-modal">Got it</button></div>
   </div></div>`;
 }
@@ -520,8 +633,9 @@ async function perform(a: Action): Promise<boolean> {
     return false;
   }
   ui.message = '';
-  await playEvents(res.events);
+  ui.actions.push(a);
   saveGame();
+  await playEvents(res.events);
   return true;
 }
 
@@ -598,6 +712,8 @@ async function runAI(): Promise<void> {
 async function humanAct(a: Action): Promise<void> {
   if (!myTurn()) return;
   ui.busy = true;
+  // Disable the controls while the action animates, so no click is silently ignored.
+  renderPanel();
   rememberPositions();
   const ok = await perform(a);
   ui.busy = false;
@@ -612,30 +728,37 @@ async function humanAct(a: Action): Promise<void> {
 // ---------------------------------------------------------------------------
 // Input
 
+/**
+ * Every tap on the board resolves by hex, in one place (KB rule 25): the legal action for that
+ * hex first (fire the armed weapon or tactic at whoever stands there, or move there), otherwise
+ * inspect the hex and whatever stands on it.
+ */
 function onBoardClick(e: Event): void {
-  if (!myTurn()) return;
-  const g = ui.game!;
-  const p = me();
-  const pid = pidFromEvent(e);
-  const key = pid !== null ? (g.players[pid].pos ? hexKey(g.players[pid].pos!) : null) : keyFromEvent(e);
-  if (!key) return;
+  const g = ui.game;
+  const key = keyFromEvent(e);
+  if (!g || !key) return;
   const hex = parseKey(key);
-  const target = g.players.find((x) => !x.destroyed && x.pos && hexKey(x.pos) === key && x.id !== HUMAN);
-
-  if (ui.mode.kind === 'aim' && target) {
-    void humanAct({ type: 'fire', weaponId: ui.mode.weaponId, targetId: target.id });
-    return;
+  const who = occupant(g, hex);
+  const enemy = who && who.id !== HUMAN ? who : undefined;
+  if (myTurn()) {
+    const p = me();
+    if (ui.mode.kind === 'aim' && enemy) {
+      void humanAct({ type: 'fire', weaponId: ui.mode.weaponId, targetId: enemy.id });
+      return;
+    }
+    if (ui.mode.kind === 'target' && enemy) {
+      void humanAct({ type: 'play', cardUid: ui.mode.cardUid, targetId: enemy.id });
+      return;
+    }
+    if (ui.mode.kind === 'idle' && p.pos && reachable(g, p).has(key)) {
+      ui.inspect = key;
+      void humanAct({ type: 'move', to: hex });
+      return;
+    }
+    if (ui.mode.kind !== 'idle') resetMode();
   }
-  if (ui.mode.kind === 'target' && target) {
-    void humanAct({ type: 'play', cardUid: ui.mode.cardUid, targetId: target.id });
-    return;
-  }
-  if (ui.mode.kind !== 'idle') {
-    resetMode();
-    renderAll();
-    return;
-  }
-  if (p.pos && reachable(g, p).has(key)) void humanAct({ type: 'move', to: hex });
+  ui.inspect = key;
+  renderAll();
 }
 
 app.addEventListener('click', (e) => {
@@ -658,13 +781,15 @@ app.addEventListener('click', (e) => {
       renderSetup();
       return;
     case 'continue': {
-      const saved = loadGame();
-      if (saved) {
-        ui.game = saved;
-        enterGame();
-      }
+      const saved = readSave();
+      if (saved.kind === 'ok') continueGame(saved.envelope);
+      else renderSetup();
       return;
     }
+    case 'discard-save':
+      discardSave();
+      renderSetup();
+      return;
     case 'rematch':
       startGame();
       return;
@@ -718,6 +843,17 @@ document.addEventListener('keydown', (e) => {
       renderAll();
     }
   }
+});
+
+// A long press never selects text or opens a callout (KB rule 24); the CSS does the work and
+// these listeners cover browsers that ignore it.
+const editable = (t: EventTarget | null) =>
+  t instanceof Element && !!t.closest('input, textarea, select, [contenteditable="true"]');
+document.addEventListener('selectstart', (e) => {
+  if (!editable(e.target)) e.preventDefault();
+});
+document.addEventListener('contextmenu', (e) => {
+  if (!editable(e.target)) e.preventDefault();
 });
 
 renderSetup();

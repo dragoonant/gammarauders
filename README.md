@@ -4,18 +4,21 @@ A browser strategy game for 1 player against 1–3 AI warlords. Each side comman
 on a hex map of a ruined world. You graft weapons and mutations onto it, claim the **Rad Wells**, and
 smash the other warlords' monsters.
 
-The game is in the same family as late-80s "giant monster on a hex map" board games. Its rules, cards, names and art are original.
+The game is in the same family as late-80s "giant monster on a hex map" board games. Its rules, cards, names and art are original. Made by evilgouki.
 
 ## Running it
 
 ```bash
 npm install
 npm run dev       # play at http://localhost:5173
-npm test          # engine + AI tests (includes full AI-vs-AI games)
+npm test          # rules tests, 30-game AI sim with invariants, save round-trip, AI-vs-random bench
+npm run e2e       # Playwright browser tests
 npm run build     # static build in dist/ (works from any path, e.g. GitHub Pages)
 ```
 
-Games autosave in the browser, and the menu offers **Continue**.
+Games autosave after every action, and the start screen offers **Continue**, which names the save it reopens. Saves live in that browser only: a local copy and the web version keep separate saves.
+
+The authoritative rules, with rule ids and the balance record, are in [`docs/spec/10-rules.md`](docs/spec/10-rules.md). The summary below is for players.
 
 ## Rules
 
@@ -96,5 +99,7 @@ The game ends the moment anyone reaches the VP target. If no one has after 30 ro
   - `rules.ts`: setup, turn flow, actions (`applyAction`), and queries.
   - `cards.ts`: card definitions. `map.ts`: symmetric map generator. `hex.ts`: axial hex math.
   - `ai.ts`: heuristic AI (`planAction` returns the next action for the current player).
-- `src/ui/board.ts` draws the SVG board. `src/main.ts` holds app state, the side panel, input handling, and AI turn playback.
-- `tests/engine.test.ts`: rules tests plus 30 full AI-vs-AI games.
+  - `save.ts`: the versioned save envelope (setup, seed, action list, snapshot).
+- `src/ui/board.ts` draws the SVG board. `src/main.ts` holds app state, the side panel, input handling, autosave, and AI turn playback.
+- `tests/engine.test.ts` (Vitest) and `tests/e2e/game.e2e.ts` (Playwright).
+- `CLAUDE.md`, `PLAN.md` (decisions) and `STATUS.md`. `docs/knowledge-base/` is the shared tabletop KB, linked as a git submodule.

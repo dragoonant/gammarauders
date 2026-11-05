@@ -271,6 +271,32 @@ function chooseScrap(s: GameState, p: Player): Action | null {
   return worst ? { type: 'scrap', cardUid: worst.uid } : null;
 }
 
+/**
+ * The bench baseline: a uniformly random legal action (graft, play, move, fire or end turn).
+ * The real AI must beat it in at least 95% of games (KB recipe step 6).
+ */
+export function randomAction(s: GameState, rand: () => number = Math.random): Action {
+  const p = currentPlayer(s);
+  const options: Action[] = [{ type: 'endTurn' }];
+  for (const c of p.hand) {
+    const d = getCard(c.defId);
+    if (d.cost > p.energy) continue;
+    if (d.kind === 'tactic') {
+      const ts = tacticTargets(s, p, d);
+      if (d.targetRange) ts.forEach((t) => options.push({ type: 'play', cardUid: c.uid, targetId: t.id }));
+      else options.push({ type: 'play', cardUid: c.uid });
+    } else {
+      for (const o of graftOptions(p, c)) options.push({ type: 'graft', cardUid: c.uid, slot: o.slot, index: o.index });
+    }
+  }
+  for (const [, r] of reachable(s, p)) options.push({ type: 'move', to: r.path[r.path.length - 1] });
+  for (const w of weapons(p)) {
+    if (!w.ready) continue;
+    for (const t of enemiesInRange(s, p, w.stats.range)) options.push({ type: 'fire', weaponId: w.id, targetId: t.id });
+  }
+  return options[Math.floor(rand() * options.length)];
+}
+
 /** Picks the next action for the current (AI) player. Call repeatedly until it returns endTurn. */
 export function planAction(s: GameState, ctx: AIContext): Action {
   const p = currentPlayer(s);

@@ -1,5 +1,5 @@
 import { hexCorners, hexKey, hexToPixel, parseKey } from '../engine/hex';
-import { playerStats } from '../engine/rules';
+import { RULES, moveCost, playerStats } from '../engine/rules';
 import type { GameState, Hex, Tile } from '../engine/types';
 
 export const HEX_SIZE = 30;
@@ -10,6 +10,7 @@ export interface BoardHighlights {
   inRange: Set<string>;
   targets: Set<number>;
   costs: Map<string, number>;
+  inspect?: string | null;
 }
 
 export const emptyHighlights = (): BoardHighlights => ({
@@ -19,13 +20,27 @@ export const emptyHighlights = (): BoardHighlights => ({
   costs: new Map(),
 });
 
-const TERRAIN_NAMES: Record<Tile['terrain'], string> = {
-  plains: 'Ash Plains — move cost 1',
-  ruins: 'Ruins — move cost 2, +1 to hit a Behemoth here',
-  swamp: 'Toxic Swamp — move cost 2',
-  rad: 'Rad Zone — move cost 1, 2 damage if you end your turn here',
-  mountain: 'Crags — impassable',
+export const TERRAIN_LABEL: Record<Tile['terrain'], string> = {
+  plains: 'Ash Plains',
+  ruins: 'Ruins',
+  swamp: 'Toxic Swamp',
+  rad: 'Rad Zone',
+  mountain: 'Crags',
 };
+
+/** Plain-language facts about a hex; every number comes from the engine (KB rule 8). */
+export function tileFacts(s: GameState, t: Tile): string[] {
+  const cost = moveCost(t, playerStats(s.players[0]));
+  const facts = [TERRAIN_LABEL[t.terrain] + (Number.isFinite(cost) ? ` · costs ${cost} to enter` : ' · impassable')];
+  if (t.terrain === 'ruins') facts.push('Cover: shots at a Behemoth here need +1');
+  if (t.terrain === 'rad') facts.push(`${RULES.radDamage} damage to a Behemoth that ends its turn here`);
+  if (t.well) {
+    const owner = t.well.owner !== null ? s.players[t.well.owner].name : 'unclaimed';
+    facts.push(`${t.well.value > 1 ? 'Heart Well' : 'Rad Well'}: ${t.well.value} VP per turn (${owner})`);
+  }
+  if (t.base !== null) facts.push(`${s.players[t.base].name}'s base`);
+  return facts;
+}
 
 function px(h: Hex) {
   return hexToPixel(h, HEX_SIZE);
@@ -78,16 +93,6 @@ function baseMarkup(s: GameState, t: Tile, x: number, y: number): string {
   return `<polygon class="base" points="${hexCorners(x, y, r)}" style="stroke:${c}"/>`;
 }
 
-function tileTitle(s: GameState, t: Tile, cost: number | undefined): string {
-  const parts = [TERRAIN_NAMES[t.terrain]];
-  if (t.well) {
-    const owner = t.well.owner !== null ? s.players[t.well.owner].name : 'unclaimed';
-    parts.push(`${t.well.value > 1 ? 'Heart Well' : 'Rad Well'}: ${t.well.value} VP per turn (${owner})`);
-  }
-  if (t.base !== null) parts.push(`${s.players[t.base].name}'s base`);
-  if (cost !== undefined) parts.push(`Move here: ${cost}`);
-  return parts.join('\n');
-}
 
 export function boardViewBox(radius: number): string {
   const w = Math.sqrt(3) * HEX_SIZE * (2 * radius + 1) + 8;
@@ -109,12 +114,12 @@ export function renderTiles(s: GameState, hl: BoardHighlights): void {
     const cls = ['tile', `t-${t.terrain}`];
     if (hl.reach.has(k)) cls.push('reach');
     if (hl.inRange.has(k)) cls.push('inrange');
+    if (hl.inspect === k) cls.push('inspected');
     out += `<g class="${cls.join(' ')}" data-key="${k}">
       <polygon points="${hexCorners(x, y, HEX_SIZE - 0.5)}"/>
       ${decor(t, x, y)}${baseMarkup(s, t, x, y)}${wellMarkup(s, t, x, y)}
       <polygon class="hl" points="${hexCorners(x, y, HEX_SIZE - 2.5)}"/>
       ${hl.costs.has(k) ? `<text class="cost" x="${x + HEX_SIZE * 0.5}" y="${y - HEX_SIZE * 0.35}" text-anchor="middle">${hl.costs.get(k)}</text>` : ''}
-      <title>${tileTitle(s, t, hl.costs.get(k))}</title>
     </g>`;
   }
   g.innerHTML = out;
@@ -145,7 +150,7 @@ export function renderTokens(s: GameState, hl: BoardHighlights, positions?: Map<
         <text class="glyph" y="${r * 0.36}" text-anchor="middle">${p.beast.charAt(0)}</text>
         <rect class="hp-bg" x="${-r}" y="${r + 3}" width="${r * 2}" height="5" rx="2"/>
         <rect class="hp" x="${-r}" y="${r + 3}" width="${r * 2}" height="5" rx="2"/>
-        <title></title>`;
+`;
       g.appendChild(el);
     }
     const pos = positions?.get(p.id) ?? p.pos;
@@ -158,7 +163,6 @@ export function renderTokens(s: GameState, hl: BoardHighlights, positions?: Map<
     const r = HEX_SIZE * 0.6;
     hp.setAttribute('width', String(Math.max(0, (p.hull / max) * r * 2)));
     hp.style.fill = p.hull / max > 0.5 ? '#7fd36b' : p.hull / max > 0.25 ? '#e8b04b' : '#e5534b';
-    el.querySelector('title')!.textContent = `${p.beast} (${p.name}) — hull ${p.hull}/${max}`;
   }
 }
 
@@ -190,11 +194,6 @@ export function floatText(at: Hex, text: string, cls: string): void {
 export function keyFromEvent(e: Event): string | null {
   const el = (e.target as Element).closest?.('[data-key]');
   return el ? (el as HTMLElement).dataset.key ?? null : null;
-}
-
-export function pidFromEvent(e: Event): number | null {
-  const el = (e.target as Element).closest?.('.token');
-  return el ? Number((el as HTMLElement).dataset.pid) : null;
 }
 
 export { hexKey, parseKey };
