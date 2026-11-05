@@ -14,6 +14,6 @@ Decisions are not re-asked. Owner quotes are verbatim, with dates.
 - **D8 Pages (default, 2026-11-05):** a gates-then-force-push to `gh-pages` workflow (the bossforge route). It runs on `main` only, and the repo is private (see Open questions).
 
 ## Open questions (defaults in use, rule 20)
-1. Make the repo public so Pages can serve it on a free plan, or keep it private? *Default: private; the workflow is ready either way.*
-2. Merge `claude/wasteland-behemoths` into `main` (which starts the deploy)? *Default: wait for the owner.*
+1. ~~Public or private?~~ Answered 2026-11-05: "You make it public". The owner changes the visibility in GitHub settings.
+2. ~~Merge to `main`?~~ Answered 2026-11-05: "Merge to main now". Done (`7230e78`); deploy run 42058901011 was green.
 3. Art and audio: this cloud session cannot reach the local studios (KB gotchas, cloud sessions). *Default: procedural SVG tokens until a session on the owner's PC runs M5/M6.*

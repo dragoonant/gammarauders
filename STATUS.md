@@ -1,6 +1,6 @@
 # Status (rewritten in place; last update 2026-11-05)
 
-**Milestone M3+M4 equivalent:** a playable game against the AI, on branch `claude/wasteland-behemoths`. Not merged, and not on Pages yet.
+**Milestone M3+M4 equivalent:** a playable game against the AI, merged to `main` (`7230e78`, 2026-11-05). The deploy workflow passed on its first run and published `gh-pages`. Pages serves it at https://dragoonant.github.io/gammarauders/ once the repo is public; the owner chose to make it public (2026-11-05).
 
 ## What works
 - Full rules (`docs/spec/10-rules.md`): setup, turn flow, grafting, tactics, movement, combat, wells, destruction and respawn, and victory.
